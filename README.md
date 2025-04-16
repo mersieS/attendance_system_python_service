@@ -76,7 +76,7 @@ dataset/
 │   ├── 1.jpg
 │   ├── 2.jpg
 │   └── ...
-├── elif_ayse/
+├── serhat/
 │   ├── ...
 ```
 
