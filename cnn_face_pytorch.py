@@ -1,113 +1,67 @@
-import os
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torchvision import datasets, transforms, models
-from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
+import face_recognition
+import numpy as np
+import cv2
+from api_client import send_attendance
+from predictor import predict_face
+import time
 
-DATA_DIR = "face_dataset"
-IMG_SIZE = 128
-BATCH_SIZE = 8
-EPOCHS = 15
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+recognized_students = set()
+last_message = ""
+last_message_time = 0
 
-data_transforms = {
-    'train': transforms.Compose([
-        transforms.Resize((IMG_SIZE, IMG_SIZE)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-    ]),
-    'val': transforms.Compose([
-        transforms.Resize((IMG_SIZE, IMG_SIZE)),
-        transforms.ToTensor(),
-    ])
-}
+total_checks = 0
+correct_matches = 0
 
-dataset = datasets.ImageFolder(DATA_DIR, transform=data_transforms['train'])
-class_names = dataset.classes
+def recognize_faces(frame, known_faces, known_names):
+    global last_message, last_message_time, total_checks, correct_matches
 
-train_size = int(0.8 * len(dataset))
-val_size = len(dataset) - train_size
-train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+    small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+    rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    face_locations = face_recognition.face_locations(rgb_frame)
+    face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
 
-class FaceCNN(nn.Module):
-    def __init__(self, num_classes):
-        super(FaceCNN, self).__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
+    for face_encoding, face_location in zip(face_encodings, face_locations):
+        top, right, bottom, left = [v * 4 for v in face_location]
+        matches = face_recognition.compare_faces(known_faces, face_encoding)
+        name = "Unknown"
 
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2)
-        )
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(64 * (IMG_SIZE//4) * (IMG_SIZE//4), 128),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(128, num_classes)
-        )
+        face_distances = face_recognition.face_distance(known_faces, face_encoding)
+        if len(face_distances) > 0:
+            best_match_index = np.argmin(face_distances)
+            if matches[best_match_index]:
+                name = known_names[best_match_index]
 
-    def forward(self, x):
-        x = self.features(x)
-        x = self.classifier(x)
-        return x
+        if name == "Unknown":
+            face_crop = frame[top:bottom, left:right]
+            cnn_name = predict_face(face_crop)
+            if cnn_name:
+                name = cnn_name + " (CNN)"
 
-model = FaceCNN(num_classes=len(class_names)).to(DEVICE)
+        total_checks += 1
+        if name != "Unknown":
+            correct_matches += 1
 
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+        accuracy = correct_matches / total_checks if total_checks > 0 else 0
+        print(f"🎯 Doğruluk oranı: {accuracy:.2%} ({correct_matches}/{total_checks})")
 
-train_acc_list, val_acc_list = [], []
+        if name != "Unknown":
+            clean_name = name.replace(" (CNN)", "")
+            if clean_name not in recognized_students:
+                recognized_students.add(clean_name)
+                send_attendance(clean_name)
+                last_message = f"{clean_name} recognized, attendance saved."
+                last_message_time = time.time()
+        else:
+            last_message = "Face is not recognized."
+            last_message_time = time.time()
 
-for epoch in range(EPOCHS):
-    model.train()
-    correct, total = 0, 0
-    for inputs, labels in train_loader:
-        inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
+        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+        cv2.putText(frame, name, (left, top - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
 
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
+    if time.time() - last_message_time < 3:
+        cv2.putText(frame, last_message, (50, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        _, predicted = torch.max(outputs, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-
-    train_acc = correct / total
-    train_acc_list.append(train_acc)
-
-    model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for inputs, labels in val_loader:
-            inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
-            outputs = model(inputs)
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-    val_acc = correct / total
-    val_acc_list.append(val_acc)
-
-    print(f"Epoch {epoch+1}/{EPOCHS} | Train Acc: {train_acc:.2f} | Val Acc: {val_acc:.2f}")
-
-torch.save(model.state_dict(), "face_cnn_model.pth")
-
-plt.plot(train_acc_list, label='Eğitim')
-plt.plot(val_acc_list, label='Doğrulama')
-plt.xlabel("Epoch")
-plt.ylabel("Doğruluk")
-plt.title("Model Başarımı")
-plt.legend()
-plt.grid()
-plt.savefig("accuracy_plot_pytorch.png")
-plt.show()
+    return frame

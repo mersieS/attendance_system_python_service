@@ -2,6 +2,7 @@ import face_recognition
 import numpy as np
 import cv2
 from api_client import send_attendance
+from predictor import predict_face
 import time
 
 recognized_students = set()
@@ -31,19 +32,27 @@ def recognize_faces(frame, known_faces, known_names):
             if matches[best_match_index]:
                 name = known_names[best_match_index]
 
+        if name == "Unknown":
+            face_crop = frame[top:bottom, left:right]
+            cnn_name = predict_face(face_crop)
+            if cnn_name:
+                name = cnn_name + " (CNN)"
+
         total_checks += 1
         if name != "Unknown":
             correct_matches += 1
 
         accuracy = correct_matches / total_checks if total_checks > 0 else 0
-        print(f"Doğruluk oranı: {accuracy:.2%} ({correct_matches}/{total_checks})")
+        print(f"🎯 Doğruluk oranı: {accuracy:.2%} ({correct_matches}/{total_checks})")
 
-        if name != "Unknown" and name not in recognized_students:
-            recognized_students.add(name)
-            send_attendance(name)
-            last_message = f"{name} recognized, attendance saved."
-            last_message_time = time.time()
-        elif name == "Unknown":
+        if name != "Unknown":
+            clean_name = name.replace(" (CNN)", "")
+            if clean_name not in recognized_students:
+                recognized_students.add(clean_name)
+                send_attendance(clean_name)
+                last_message = f"{clean_name} recognized, attendance saved."
+                last_message_time = time.time()
+        else:
             last_message = "Face is not recognized."
             last_message_time = time.time()
 
