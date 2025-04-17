@@ -1,67 +1,28 @@
-import face_recognition
-import numpy as np
-import cv2
-from api_client import send_attendance
-from predictor import predict_face
-import time
+import torch
+import torch.nn as nn
 
-recognized_students = set()
-last_message = ""
-last_message_time = 0
+class FaceCNN(nn.Module):
+    def __init__(self, num_classes):
+        super(FaceCNN, self).__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
 
-total_checks = 0
-correct_matches = 0
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        )
 
-def recognize_faces(frame, known_faces, known_names):
-    global last_message, last_message_time, total_checks, correct_matches
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * 32 * 32, 128),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(128, num_classes)
+        )
 
-    small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-    rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-
-    face_locations = face_recognition.face_locations(rgb_frame)
-    face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
-
-    for face_encoding, face_location in zip(face_encodings, face_locations):
-        top, right, bottom, left = [v * 4 for v in face_location]
-        matches = face_recognition.compare_faces(known_faces, face_encoding)
-        name = "Unknown"
-
-        face_distances = face_recognition.face_distance(known_faces, face_encoding)
-        if len(face_distances) > 0:
-            best_match_index = np.argmin(face_distances)
-            if matches[best_match_index]:
-                name = known_names[best_match_index]
-
-        if name == "Unknown":
-            face_crop = frame[top:bottom, left:right]
-            cnn_name = predict_face(face_crop)
-            if cnn_name:
-                name = cnn_name + " (CNN)"
-
-        total_checks += 1
-        if name != "Unknown":
-            correct_matches += 1
-
-        accuracy = correct_matches / total_checks if total_checks > 0 else 0
-        print(f"🎯 Doğruluk oranı: {accuracy:.2%} ({correct_matches}/{total_checks})")
-
-        if name != "Unknown":
-            clean_name = name.replace(" (CNN)", "")
-            if clean_name not in recognized_students:
-                recognized_students.add(clean_name)
-                send_attendance(clean_name)
-                last_message = f"{clean_name} recognized, attendance saved."
-                last_message_time = time.time()
-        else:
-            last_message = "Face is not recognized."
-            last_message_time = time.time()
-
-        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-        cv2.putText(frame, name, (left, top - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-
-    if time.time() - last_message_time < 3:
-        cv2.putText(frame, last_message, (50, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-
-    return frame
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
